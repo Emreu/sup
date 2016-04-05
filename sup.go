@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -63,6 +64,12 @@ func (sup *Stackup) Run(network *Network, commands ...*Command) error {
 			}
 			clients = append(clients, local)
 			continue
+		}
+
+		// Add host ip
+		ips, err := net.LookupIP(host[strings.Index(host, "@")+1:])
+		if err == nil && len(ips) > 0 {
+			env += `export SUP_LOCAL_IP="` + ips[0].String() + `";`
 		}
 
 		// SSH client.
