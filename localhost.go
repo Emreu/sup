@@ -3,8 +3,11 @@ package sup
 import (
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"os/user"
+
+	"github.com/pkg/errors"
 )
 
 // Client is a wrapper over the SSH connection/sessions.
@@ -35,7 +38,7 @@ func (c *LocalhostClient) Run(task *Task) error {
 		return fmt.Errorf("Command already running")
 	}
 
-	cmd := exec.Command("bash", "-c", c.env+"set -x;"+task.Run)
+	cmd := exec.Command("bash", "-c", c.env+task.Run)
 	c.cmd = cmd
 
 	c.stdout, err = cmd.StdoutPipe()
@@ -97,4 +100,20 @@ func (c *LocalhostClient) Write(p []byte) (n int, err error) {
 
 func (c *LocalhostClient) WriteClose() error {
 	return c.stdin.Close()
+}
+
+func (c *LocalhostClient) Signal(sig os.Signal) error {
+	return c.cmd.Process.Signal(sig)
+}
+
+func ResolveLocalPath(cwd, path, env string) (string, error) {
+	// Check if file exists first. Use bash to resolve $ENV_VARs.
+	cmd := exec.Command("bash", "-c", env+"echo -n "+path)
+	cmd.Dir = cwd
+	resolvedFilename, err := cmd.Output()
+	if err != nil {
+		return "", errors.Wrap(err, "resolving path failed")
+	}
+
+	return string(resolvedFilename), nil
 }

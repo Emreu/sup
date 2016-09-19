@@ -2,13 +2,14 @@ package sup
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/pkg/errors"
 
 	"gopkg.in/yaml.v2"
 )
@@ -71,7 +72,7 @@ func (e EnvVar) AsExport() string {
 
 // EnvList is a list of environment variables that maps to a YAML map,
 // but maintains order, enabling late variables to reference early variables.
-type EnvList []EnvVar
+type EnvList []*EnvVar
 
 func (e *EnvList) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	items := []yaml.MapItem{}
@@ -92,18 +93,61 @@ func (e *EnvList) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 // Set key to be equal value in this list.
 func (e *EnvList) Set(key, value string) {
-
-	for _, v := range *e {
+	for i, v := range *e {
 		if v.Key == key {
-			v.Value = value
+			(*e)[i].Value = value
 			return
 		}
 	}
 
-	*e = append(*e, EnvVar{
+	*e = append(*e, &EnvVar{
 		Key:   key,
 		Value: value,
 	})
+}
+
+func (e *EnvList) ResolveValues() error {
+	if len(*e) == 0 {
+		return nil
+	}
+
+	exports := ""
+	for i, v := range *e {
+		exports += v.AsExport()
+
+		cmd := exec.Command("bash", "-c", exports+"echo -n "+v.Value+";")
+		cwd, err := os.Getwd()
+		if err != nil {
+			return err
+		}
+		cmd.Dir = cwd
+		resolvedValue, err := cmd.Output()
+		if err != nil {
+			return errors.Wrapf(err, "resolving env var %v failed", v.Key)
+		}
+
+		(*e)[i].Value = string(resolvedValue)
+	}
+
+	return nil
+}
+
+func (e *EnvList) AsExport() string {
+	// Process all ENVs into a string of form
+	// `export FOO="bar"; export BAR="baz";`.
+	exports := ``
+	for _, v := range *e {
+		exports += v.AsExport() + " "
+	}
+	return exports
+}
+
+type ErrMustUpdate struct {
+	Msg string
+}
+
+func (e ErrMustUpdate) Error() string {
+	return fmt.Sprintf("%v\n\nPlease update sup by `go get -u github.com/pressly/sup/cmd/sup`", e.Msg)
 }
 
 // NewSupfile parses configuration file and returns Supfile or error.
@@ -123,31 +167,34 @@ func NewSupfile(file string) (*Supfile, error) {
 	case "":
 		conf.Version = "0.1"
 		fallthrough
+
 	case "0.1":
 		for _, cmd := range conf.Commands {
 			if cmd.RunOnce {
-				return nil, errors.New("command.run_once is not supported in Supfile v" + conf.Version)
+				return nil, ErrMustUpdate{"command.run_once is not supported in Supfile v" + conf.Version}
 			}
 		}
 		fallthrough
+
 	case "0.2":
 		for _, cmd := range conf.Commands {
 			if cmd.Once {
-				return nil, errors.New("command.once is not supported in Supfile v" + conf.Version)
+				return nil, ErrMustUpdate{"command.once is not supported in Supfile v" + conf.Version}
 			}
 			if cmd.Local != "" {
-				return nil, errors.New("command.local is not supported in Supfile v" + conf.Version)
+				return nil, ErrMustUpdate{"command.local is not supported in Supfile v" + conf.Version}
 			}
 			if cmd.Serial != 0 {
-				return nil, errors.New("command.serial is not supported in Supfile v" + conf.Version)
+				return nil, ErrMustUpdate{"command.serial is not supported in Supfile v" + conf.Version}
 			}
 		}
 		for _, network := range conf.Networks {
 			if network.Inventory != "" {
-				return nil, errors.New("network.inventory is not supported in Supfile v" + conf.Version)
+				return nil, ErrMustUpdate{"network.inventory is not supported in Supfile v" + conf.Version}
 			}
 		}
 		fallthrough
+
 	case "0.3":
 		var warning string
 		for key, cmd := range conf.Commands {
@@ -160,8 +207,13 @@ func NewSupfile(file string) (*Supfile, error) {
 		if warning != "" {
 			fmt.Fprintf(os.Stderr, warning)
 		}
+
+		fallthrough
+
+	case "0.4", "0.5":
+
 	default:
-		return nil, errors.New("unsupported version, please update sup by `go get -u github.com/pressly/sup`")
+		return nil, ErrMustUpdate{"unsupported version " + conf.Version}
 	}
 
 	for i, network := range conf.Networks {

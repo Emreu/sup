@@ -1,7 +1,6 @@
 package main
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -10,31 +9,55 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/pressly/sup"
 )
 
 var (
-	showVersion bool
-	showHelp    bool
 	supfile     string
+	envVars     flagStringSlice
 	onlyHosts   string
 	exceptHosts string
 
-	ErrUsage            = errors.New("Usage: sup [OPTIONS] NETWORK TARGET/COMMAND [...]\n       sup [ --help | -v | --version ]")
+	debug         bool
+	disablePrefix bool
+
+	showVersion bool
+	showHelp    bool
+
+	ErrUsage            = errors.New("Usage: sup [OPTIONS] NETWORK COMMAND [...]\n       sup [ --help | -v | --version ]")
 	ErrUnknownNetwork   = errors.New("Unknown network")
 	ErrNetworkNoHosts   = errors.New("No hosts defined for a given network")
 	ErrCmd              = errors.New("Unknown command/target")
 	ErrTargetNoCommands = errors.New("No commands defined for a given target")
 )
 
+type flagStringSlice []string
+
+func (f *flagStringSlice) String() string {
+	return fmt.Sprintf("%v", *f)
+}
+
+func (f *flagStringSlice) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 func init() {
-	flag.BoolVar(&showVersion, "v", false, "print version")
-	flag.BoolVar(&showVersion, "version", false, "print version")
-	flag.BoolVar(&showHelp, "h", false, "show help")
-	flag.BoolVar(&showHelp, "help", false, "show help")
-	flag.StringVar(&supfile, "f", "./Supfile", "custom path to Supfile")
-	flag.StringVar(&onlyHosts, "only", "", "filter hosts using regexp")
-	flag.StringVar(&exceptHosts, "except", "", "filter out hosts using regexp")
+	flag.StringVar(&supfile, "f", "./Supfile", "Custom path to Supfile")
+	flag.Var(&envVars, "e", "Set environment variables")
+	flag.Var(&envVars, "env", "Set environment variables")
+	flag.StringVar(&onlyHosts, "only", "", "Filter hosts using regexp")
+	flag.StringVar(&exceptHosts, "except", "", "Filter out hosts using regexp")
+
+	flag.BoolVar(&debug, "D", false, "Enable debug mode")
+	flag.BoolVar(&debug, "debug", false, "Enable debug mode")
+	flag.BoolVar(&disablePrefix, "disable-prefix", false, "Disable hostname prefix")
+
+	flag.BoolVar(&showVersion, "v", false, "Print version")
+	flag.BoolVar(&showVersion, "version", false, "Print version")
+	flag.BoolVar(&showHelp, "h", false, "Show help")
+	flag.BoolVar(&showHelp, "help", false, "Show help")
 }
 
 func networkUsage(conf *sup.Supfile) {
@@ -77,7 +100,6 @@ func parseArgs(conf *sup.Supfile) (*sup.Network, []*sup.Command, error) {
 	var commands []*sup.Command
 
 	args := flag.Args()
-
 	if len(args) < 1 {
 		networkUsage(conf)
 		return nil, nil, ErrUsage
@@ -182,7 +204,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// --only option to filter hosts
+	// --only flag filters hosts
 	if onlyHosts != "" {
 		expr, err := regexp.CompilePOSIX(onlyHosts)
 		if err != nil {
@@ -203,7 +225,7 @@ func main() {
 		network.Hosts = hosts
 	}
 
-	// --except option to filter out hosts
+	// --except flag filters out hosts
 	if exceptHosts != "" {
 		expr, err := regexp.CompilePOSIX(exceptHosts)
 		if err != nil {
@@ -224,15 +246,51 @@ func main() {
 		network.Hosts = hosts
 	}
 
+	var vars sup.EnvList
+	for _, val := range append(conf.Env, network.Env...) {
+		vars.Set(val.Key, val.Value)
+	}
+	if err := vars.ResolveValues(); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
+	// Parse CLI --env flag env vars, define $SUP_ENV and override values defined in Supfile.
+	var cliVars sup.EnvList
+	for _, env := range envVars {
+		if len(env) == 0 {
+			continue
+		}
+		i := strings.Index(env, "=")
+		if i < 0 {
+			if len(env) > 0 {
+				vars.Set(env, "")
+			}
+			continue
+		}
+		vars.Set(env[:i], env[i+1:])
+		cliVars.Set(env[:i], env[i+1:])
+	}
+
+	// SUP_ENV is generated only from CLI env vars.
+	// Separate loop to omit duplicates.
+	supEnv := ""
+	for _, v := range cliVars {
+		supEnv += fmt.Sprintf(" -e %v=%q", v.Key, v.Value)
+	}
+	vars.Set("SUP_ENV", strings.TrimSpace(supEnv))
+
 	// Create new Stackup app.
 	app, err := sup.New(conf)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
+	app.Debug(debug)
+	app.Prefix(!disablePrefix)
 
 	// Run all the commands in the given network.
-	err = app.Run(network, commands...)
+	err = app.Run(network, vars, commands...)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
